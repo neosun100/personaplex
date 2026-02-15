@@ -1,0 +1,37 @@
+services:
+  personaplex:
+    image: neosun/personaplex:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: personaplex
+    ports:
+      - "${PORT:-8998}:8998"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+      - PORT=8998
+      - HOST=0.0.0.0
+      - DEVICE=${DEVICE:-cuda}
+      - CPU_OFFLOAD=${CPU_OFFLOAD:-false}
+      - GPU_IDLE_TIMEOUT=${GPU_IDLE_TIMEOUT:-300}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+      - /tmp/personaplex:/tmp/personaplex
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['${NVIDIA_VISIBLE_DEVICES:-0}']
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8998/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
+volumes:
+  hf-cache:

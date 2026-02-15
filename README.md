@@ -1,179 +1,251 @@
-# PersonaPlex: Voice and Role Control for Full Duplex Conversational Speech Models
+[English](README.md) | [简体中文](README_CN.md) | [繁體中文](README_TW.md) | [日本語](README_JP.md)
 
-[![Weights](https://img.shields.io/badge/🤗-Weights-yellow)](https://huggingface.co/nvidia/personaplex-7b-v1)
+# 🎙️ PersonaPlex
+
+[![Docker](https://img.shields.io/badge/Docker-neosun%2Fpersonaplex-blue?logo=docker)](https://hub.docker.com/r/neosun/personaplex)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE-MIT)
 [![Paper](https://img.shields.io/badge/📄-Paper-blue)](https://arxiv.org/abs/2602.06053)
+[![Model](https://img.shields.io/badge/🤗-Model-yellow)](https://huggingface.co/nvidia/personaplex-7b-v1)
 [![Demo](https://img.shields.io/badge/🎮-Demo-green)](https://research.nvidia.com/labs/adlr/personaplex/)
-[![Discord](https://img.shields.io/badge/Discord-Join-purple?logo=discord)](https://discord.gg/5jAXrrbwRb)
 
-PersonaPlex is a real-time, full-duplex speech-to-speech conversational model that enables persona control through text-based role prompts and audio-based voice conditioning. Trained on a combination of synthetic and real conversations, it produces natural, low-latency spoken interactions with a consistent persona. PersonaPlex is based on the [Moshi](https://arxiv.org/abs/2410.00037) architecture and weights.
+**Real-time Full-Duplex Conversational AI with Voice and Role Control**
 
-<p align="center">
-  <img src="assets/architecture_diagram.png" alt="PersonaPlex Model Architecture">
-  <br>
-  <em>PersonaPlex Architecture</em>
-</p>
+PersonaPlex is a speech-to-speech conversational model that enables persona control through text-based role prompts and audio-based voice conditioning. It produces natural, low-latency spoken interactions with consistent personas.
 
-## Usage
+![Screenshot](assets/architecture_diagram.png)
 
-### Prerequisites
+---
 
-Install the [Opus audio codec](https://github.com/xiph/opus) development library:
+## ✨ Features
+
+| Feature | Description |
+|---------|-------------|
+| 🎯 **Full-Duplex** | Real-time bidirectional conversation |
+| 🎭 **Persona Control** | Text prompts define AI personality |
+| 🗣️ **Voice Selection** | 18 pre-trained voice options |
+| 🌐 **Multi-language UI** | English, 中文, 繁體, 日本語 |
+| 🐳 **All-in-One Docker** | Single container deployment |
+| 📡 **REST API** | OpenAPI/Swagger documented |
+| 🔌 **MCP Support** | Model Context Protocol integration |
+| 🖥️ **GPU Management** | Auto-select & memory offload |
+
+## 🚀 Quick Start
+
+### Docker (Recommended)
+
 ```bash
-# Ubuntu/Debian
-sudo apt install libopus-dev
+# Pull and run
+docker run -d --gpus all \
+  -p 8998:8998 \
+  -e HF_TOKEN=your_token \
+  --name personaplex \
+  neosun/personaplex:latest
 
-# Fedora/RHEL
-sudo dnf install opus-devel
-
-# macOS
-brew install opus
+# Access Web UI
+open http://localhost:8998
 ```
 
-### Installation
+### Docker Compose
 
-Download this repository and install with:
+```yaml
+version: '3.8'
+services:
+  personaplex:
+    image: neosun/personaplex:latest
+    container_name: personaplex
+    ports:
+      - "8998:8998"
+    environment:
+      - HF_TOKEN=${HF_TOKEN}
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+      - /tmp/personaplex:/tmp/personaplex
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+```
+
 ```bash
-pip install moshi/.
+# Set token and start
+export HF_TOKEN=your_huggingface_token
+docker-compose up -d
 ```
 
-Extra step for Blackwell based GPUs as suggested in (See https://github.com/NVIDIA/personaplex/issues/2):
+### One-Click Start
+
 ```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+# Clone repository
+git clone https://github.com/neosun100/personaplex.git
+cd personaplex
+
+# Set HF token
+export HF_TOKEN=your_huggingface_token
+
+# Start (auto-selects GPU with lowest memory usage)
+./start.sh
 ```
 
+## ⚙️ Configuration
 
-### Accept Model License
-Log in to your Huggingface account and accept the PersonaPlex model license [here](https://huggingface.co/nvidia/personaplex-7b-v1). <br>
-Then set up your Huggingface authentication:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HF_TOKEN` | - | **Required**: HuggingFace token |
+| `PORT` | `8998` | Web UI port |
+| `DEVICE` | `cuda` | Device: cuda, cpu |
+| `CPU_OFFLOAD` | `false` | Offload to CPU if GPU OOM |
+| `GPU_IDLE_TIMEOUT` | `300` | Auto-unload after idle (seconds) |
+| `NVIDIA_VISIBLE_DEVICES` | `0` | GPU ID to use |
+
+### GPU Selection
+
 ```bash
-export HF_TOKEN=<YOUR_HUGGINGFACE_TOKEN>
+# Use specific GPU
+export NVIDIA_VISIBLE_DEVICES=2
+docker-compose up -d
+
+# Or in docker-compose.yml
+deploy:
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          device_ids: ['2']
+          capabilities: [gpu]
 ```
 
-### Launch Server
+## 🗣️ Voice Options
 
-Launch server for live interaction (temporary SSL certs for https):
-```bash
-SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR"
-```
+| Category | IDs | Description |
+|----------|-----|-------------|
+| Natural Female | NATF0-3 | Natural, conversational |
+| Natural Male | NATM0-3 | Natural, conversational |
+| Variety Female | VARF0-4 | Diverse styles |
+| Variety Male | VARM0-4 | Diverse styles |
 
-**CPU Offload:** If your GPU has insufficient memory, use the `--cpu-offload` flag to offload model layers to CPU. This requires the `accelerate` package (`pip install accelerate`):
-```bash
-SSL_DIR=$(mktemp -d); python -m moshi.server --ssl "$SSL_DIR" --cpu-offload
-```
+## 📝 Prompt Examples
 
-Access the Web UI from a browser at `localhost:8998` if running locally, otherwise look for the access link printed by the script:
-```
-Access the Web UI directly at https://11.54.401.33:8998
-```
-
-### Offline Evaluation
-
-For offline evaluation use the offline script that streams in an input wav file and produces an output wav file from the captured output stream. The output file will be the same duration as the input file.
-
-Add `--cpu-offload` to any command below if your GPU has insufficient memory (requires `accelerate` package). Or install cpu-only PyTorch for offline evaluation on pure CPU.
-
-**Assistant example:**
-```bash
-HF_TOKEN=<TOKEN> \
-python -m moshi.offline \
-  --voice-prompt "NATF2.pt" \
-  --input-wav "assets/test/input_assistant.wav" \
-  --seed 42424242 \
-  --output-wav "output.wav" \
-  --output-text "output.json"
-```
-
-**Service example:**
-```bash
-HF_TOKEN=<TOKEN> \
-python -m moshi.offline \
-  --voice-prompt "NATM1.pt" \
-  --text-prompt "$(cat assets/test/prompt_service.txt)" \
-  --input-wav "assets/test/input_service.wav" \
-  --seed 42424242 \
-  --output-wav "output.wav" \
-  --output-text "output.json"
-```
-
-## Voices
-
-PersonaPlex supports a wide range of voices; we pre-package embeddings for voices that sound more natural and conversational (NAT) and others that are more varied (VAR). The fixed set of voices are labeled:
-```
-Natural(female): NATF0, NATF1, NATF2, NATF3
-Natural(male):   NATM0, NATM1, NATM2, NATM3
-Variety(female): VARF0, VARF1, VARF2, VARF3, VARF4
-Variety(male):   VARM0, VARM1, VARM2, VARM3, VARM4
-```
-
-## Prompting Guide
-
-The model is trained on synthetic conversations for a fixed assistant role and varying customer service roles.
-
-### Assistant Role
-
-The assistant role has the prompt:
+### Assistant (Default)
 ```
 You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.
 ```
 
-Use this prompt for the QA assistant focused "User Interruption" evaluation category in [FullDuplexBench](https://arxiv.org/abs/2503.04721).
-
-### Customer Service Roles
-
-The customer service roles support a variety of prompts. Here are some examples for prompting style reference:
+### Customer Service
 ```
-You work for CitySan Services which is a waste management and your name is Ayelen Lucero. Information: Verify customer name Omar Torres. Current schedule: every other week. Upcoming pickup: April 12th. Compost bin service available for $8/month add-on.
-```
-```
-You work for Jerusalem Shakshuka which is a restaurant and your name is Owen Foster. Information: There are two shakshuka options: Classic (poached eggs, $9.50) and Spicy (scrambled eggs with jalapenos, $10.25). Sides include warm pita ($2.50) and Israeli salad ($3). No combo offers. Available for drive-through until 9 PM.
-```
-```
-You work for AeroRentals Pro which is a drone rental company and your name is Tomaz Novak. Information: AeroRentals Pro has the following availability: PhoenixDrone X ($65/4 hours, $110/8 hours), and the premium SpectraDrone 9 ($95/4 hours, $160/8 hours). Deposit required: $150 for standard models, $300 for premium.
+You work for First Neuron Bank which is a bank and your name is Alexis Kim. Information: The customer's transaction for $1,200 at Home Depot was declined. Verify customer identity.
 ```
 
-### Casual Conversations
-
-The model is also trained on real conversations from the [Fisher English Corpus](https://catalog.ldc.upenn.edu/LDC2004T19) with LLM-labeled prompts for open-ended conversations. Here are some example prompts for casual conversations:
+### Casual Conversation
 ```
 You enjoy having a good conversation.
 ```
-```
-You enjoy having a good conversation. Have a casual discussion about eating at home versus dining out.
-```
-```
-You enjoy having a good conversation. Have an empathetic discussion about the meaning of family amid uncertainty.
-```
-```
-You enjoy having a good conversation. Have a reflective conversation about career changes and feeling of home. You have lived in California for 21 years and consider San Francisco your home. You work as a teacher and have traveled a lot. You dislike meetings.
-```
-```
-You enjoy having a good conversation. Have a casual conversation about favorite foods and cooking experiences. You are David Green, a former baker now living in Boston. You enjoy cooking diverse international dishes and appreciate many ethnic restaurants.
+
+## 📡 API Reference
+
+### Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | Web UI |
+| `/health` | GET | Health check |
+| `/docs` | GET | Swagger API docs |
+| `/api/gpu/status` | GET | GPU status |
+| `/api/gpu/offload` | POST | Release GPU memory |
+| `/api/voices` | GET | List voices |
+| `/api/offline` | POST | Offline inference |
+| `/api/chat` | WebSocket | Real-time conversation |
+
+### Offline Inference
+
+```bash
+curl -X POST http://localhost:8998/api/offline \
+  -F "file=@input.wav" \
+  -F "voice_prompt=NATF2.pt" \
+  -F "text_prompt=You are a helpful assistant." \
+  -o output.wav
 ```
 
-Use the prompt `You enjoy having a good conversation.` for the "Pause Handling", "Backchannel" and "Smooth Turn Taking" evaluation categories of FullDuplexBench.
+## 🔌 MCP Integration
 
-## Generalization
+See [MCP_GUIDE.md](MCP_GUIDE.md) for Model Context Protocol integration.
 
-Personaplex finetunes Moshi and benefits from the generalization capabilities of the underlying [Helium](https://kyutai.org/blog/2025-04-30-helium) LLM. Thanks to the broad training corpus of the backbone, we find that the model will respond plausibly to out-of-distribution prompts and lead to unexpected or fun conversations. We encourage experimentation with different prompts to test the model's emergent ability to handle scenarios outside its training distribution. As an inspiration we feature the following astronaut prompt in the WebUI:
-```
-You enjoy having a good conversation. Have a technical discussion about fixing a reactor core on a spaceship to Mars. You are an astronaut on a Mars mission. Your name is Alex. You are already dealing with a reactor core meltdown on a Mars mission. Several ship systems are failing, and continued instability will lead to catastrophic failure. You explain what is happening and you urgently ask for help thinking through how to stabilize the reactor.
-```
-
-## License
-
-The present code is provided under the MIT license. The weights for the models are released under the NVIDIA Open Model license.
-
-## Citation
-
-If you use PersonaPlex in your research, please cite our paper:
-```bibtex
-@misc{roy2026personaplexvoicerolecontrol,
-      title={PersonaPlex: Voice and Role Control for Full Duplex Conversational Speech Models}, 
-      author={Rajarshi Roy and Jonathan Raiman and Sang-gil Lee and Teodor-Dumitru Ene and Robert Kirby and Sungwon Kim and Jaehyeon Kim and Bryan Catanzaro},
-      year={2026},
-      eprint={2602.06053},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2602.06053}, 
+```json
+{
+  "mcpServers": {
+    "personaplex": {
+      "command": "docker",
+      "args": ["exec", "-i", "personaplex", "python", "-m", "app.mcp_server"]
+    }
+  }
 }
 ```
+
+## 🏗️ Project Structure
+
+```
+personaplex/
+├── app/
+│   ├── server.py          # FastAPI server
+│   ├── mcp_server.py      # MCP server
+│   └── templates/         # Web UI
+├── moshi/                  # Core model package
+├── client/                 # Original React client
+├── assets/                 # Test files
+├── Dockerfile             # All-in-One image
+├── docker-compose.yml     # Compose config
+├── start.sh               # One-click start
+└── MCP_GUIDE.md           # MCP documentation
+```
+
+## 🛠️ Tech Stack
+
+- **Model**: [PersonaPlex](https://huggingface.co/nvidia/personaplex-7b-v1) based on Moshi
+- **Backend**: FastAPI + Uvicorn
+- **Frontend**: Jinja2 + Vanilla JS
+- **Container**: NVIDIA CUDA 12.4 + cuDNN
+- **Protocol**: WebSocket + REST + MCP
+
+## 📋 Changelog
+
+### v1.0.0 (2026-02-16)
+- 🐳 All-in-One Docker deployment
+- 🌐 Multi-language Web UI (EN/中文/繁體/日本語)
+- 📡 REST API with Swagger docs
+- 🔌 MCP server integration
+- 🖥️ Auto GPU selection
+- 🗑️ GPU memory offload
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing`)
+5. Open a Pull Request
+
+## 📄 License
+
+- Code: MIT License
+- Model Weights: [NVIDIA Open Model License](https://huggingface.co/nvidia/personaplex-7b-v1)
+
+## 🙏 Acknowledgments
+
+- [NVIDIA PersonaPlex](https://arxiv.org/abs/2602.06053) - Original research
+- [Kyutai Moshi](https://arxiv.org/abs/2410.00037) - Base architecture
+- [Helium LLM](https://kyutai.org/blog/2025-04-30-helium) - Language model backbone
+
+---
+
+## ⭐ Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=neosun100/personaplex&type=Date)](https://star-history.com/#neosun100/personaplex)
+
+## 📱 Follow Us
+
+![WeChat](https://img.aws.xin/uPic/扫码_搜索联合传播样式-标准色版.png)

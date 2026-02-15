@@ -1,25 +1,61 @@
-ARG BASE_IMAGE="nvcr.io/nvidia/cuda"
-ARG BASE_IMAGE_TAG="12.4.1-runtime-ubuntu22.04"
+# PersonaPlex All-in-One Docker Image
+ARG BASE_IMAGE="nvidia/cuda"
+ARG BASE_IMAGE_TAG="12.4.1-cudnn-runtime-ubuntu22.04"
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
+FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG}
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV HF_HOME=/root/.cache/huggingface
 
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     pkg-config \
     libopus-dev \
- && rm -rf /var/lib/apt/lists/*
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
+    python3-pip \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
-WORKDIR /app/moshi/
+WORKDIR /app
 
+# Install PyTorch first
+RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Copy moshi package and install
 COPY moshi/ /app/moshi/
-RUN uv venv /app/moshi/.venv --python 3.12
-RUN uv sync
+RUN pip3 install --no-cache-dir /app/moshi/.
 
-RUN mkdir -p /app/ssl
+# Install additional dependencies
+RUN pip3 install --no-cache-dir \
+    fastapi \
+    uvicorn[standard] \
+    python-multipart \
+    aiofiles \
+    jinja2 \
+    fastmcp
+
+# Copy application files
+COPY app/ /app/app/
+COPY assets/ /app/assets/
+
+# Create directories
+RUN mkdir -p /app/ssl /tmp/personaplex /app/outputs
 
 EXPOSE 8998
 
-ENTRYPOINT []
-CMD ["/app/moshi/.venv/bin/python", "-m", "moshi.server", "--ssl", "/app/ssl"]
+ENV PORT=8998
+ENV HOST=0.0.0.0
+ENV DEVICE=cuda
+ENV CPU_OFFLOAD=false
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+    CMD curl -f http://localhost:${PORT}/health || exit 1
+
+CMD ["python3", "-m", "app.server"]
