@@ -139,6 +139,14 @@ export HF_TOKEN=your_huggingface_token
 
 ## 📋 更新日誌
 
+### v1.2.0 (2026-02-16)
+- 🔧 修復CUDA OOM：推理迴圈添加 `torch.no_grad()`（支援無限時長對話）
+- 🔒 修復GPU鎖：逾時返回「伺服器忙碌」而非無限等待
+- 🎤 完整的瀏覽器語音對話（透過WebSocket進行Opus編解碼）
+- 💬 串流AI文字顯示，按時間自動分段
+- 🏓 模型載入期間WebSocket保活（修復Cloudflare 502）
+- 🐛 修復 `tensor.detach().numpy()` RuntimeError
+
 ### v1.0.0 (2026-02-16)
 - 🐳 一體化Docker部署
 - 🌐 多語言Web介面（英/中/繁/日）

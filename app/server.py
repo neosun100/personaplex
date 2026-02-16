@@ -564,6 +564,7 @@ async def websocket_chat(ws: WebSocket):
                 close = True
 
         async def opus_loop():
+          with torch.no_grad():
             all_pcm_data = None
             while not close:
                 await asyncio.sleep(0.001)

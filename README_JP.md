@@ -139,6 +139,14 @@ export HF_TOKEN=your_huggingface_token
 
 ## 📋 変更履歴
 
+### v1.2.0 (2026-02-16)
+- 🔧 CUDA OOM修正：推論ループに `torch.no_grad()` 追加（無制限の会話が可能に）
+- 🔒 GPUロック修正：無限待機の代わりに「サーバービジー」タイムアウト
+- 🎤 ブラウザベースの完全な音声チャット（WebSocket経由のOpusエンコード/デコード）
+- 💬 ストリーミングAIテキスト表示、時間ベースのメッセージバブル
+- 🏓 モデルロード中のWebSocketキープアライブ（Cloudflare 502修正）
+- 🐛 `tensor.detach().numpy()` RuntimeError修正
+
 ### v1.0.0 (2026-02-16)
 - 🐳 オールインワンDockerデプロイ
 - 🌐 多言語Web UI（英/中/繁/日）

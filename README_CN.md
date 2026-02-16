@@ -211,6 +211,14 @@ personaplex/
 
 ## 📋 更新日志
 
+### v1.2.0 (2026-02-16)
+- 🔧 修复CUDA OOM：推理循环添加 `torch.no_grad()`（支持无限时长对话）
+- 🔒 修复GPU锁：超时返回"服务器忙"而非无限等待
+- 🎤 完整的浏览器语音对话（通过WebSocket进行Opus编解码）
+- 💬 流式AI文字显示，按时间自动分段
+- 🏓 模型加载期间WebSocket保活（修复Cloudflare 502）
+- 🐛 修复 `tensor.detach().numpy()` RuntimeError
+
 ### v1.0.0 (2026-02-16)
 - 🐳 一体化Docker部署
 - 🌐 多语言Web界面（英/中/繁/日）

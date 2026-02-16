@@ -14,6 +14,8 @@ PersonaPlex is a speech-to-speech conversational model that enables persona cont
 
 ![Screenshot](assets/architecture_diagram.png)
 
+![Web UI](personaplex-ui.png)
+
 ---
 
 ## ✨ Features
@@ -210,6 +212,14 @@ personaplex/
 - **Protocol**: WebSocket + REST + MCP
 
 ## 📋 Changelog
+
+### v1.2.0 (2026-02-16)
+- 🔧 Fix CUDA OOM: add `torch.no_grad()` to inference loop (enables unlimited conversation)
+- 🔒 Fix GPU lock: timeout with "Server busy" instead of infinite hang
+- 🎤 Full browser-based voice chat (Opus encode/decode via WebSocket)
+- 💬 Streaming AI text display with time-based message bubbles
+- 🏓 WebSocket keepalive during model loading (fixes Cloudflare 502)
+- 🐛 Fix `tensor.detach().numpy()` RuntimeError
 
 ### v1.0.0 (2026-02-16)
 - 🐳 All-in-One Docker deployment
