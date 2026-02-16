@@ -362,7 +362,6 @@
         const T = {{ t | tojson | safe }};
         let ws = null, audioContext = null, isConnected = false;
         let recorder = null, decoderWorker = null, workletNode = null, currentAiMsg = null;
-        let speechRec = null, currentUserMsg = null;
 
         // --- AudioWorklet processor code (inline blob) ---
         const WORKLET_SRC = `
@@ -531,7 +530,6 @@ registerProcessor('moshi-processor', MoshiProcessor);`;
 
                 recorder.start().then(() => {
                     console.log('[PersonaPlex] Recorder started');
-                    startSpeechRecognition();
                 }).catch((err) => {
                     console.warn('[PersonaPlex] Mic unavailable:', err.message);
                 });
@@ -570,10 +568,6 @@ registerProcessor('moshi-processor', MoshiProcessor);`;
             }
             isConnected = false;
             currentAiMsg = null;
-            currentUserMsg = null;
-            aiSpeaking = false;
-            if (aiSpeakTimer) { clearTimeout(aiSpeakTimer); aiSpeakTimer = null; }
-            if (speechRec) { try { speechRec.onend = null; speechRec.abort(); } catch(e) {} speechRec = null; }
             updateStatus('disconnected', T.disconnected);
             document.getElementById('connectBtn').textContent = T.connect;
             document.getElementById('visualizer').classList.remove('active');
@@ -584,61 +578,20 @@ registerProcessor('moshi-processor', MoshiProcessor);`;
             document.getElementById('statusText').textContent = text;
         }
 
-        let aiSpeaking = false, aiSpeakTimer = null;
+        let lastTokenTime = 0;
 
         function appendToken(text) {
             const transcript = document.getElementById('transcript');
-            // Mark AI as speaking, reset timer
-            aiSpeaking = true;
-            if (aiSpeakTimer) clearTimeout(aiSpeakTimer);
-            aiSpeakTimer = setTimeout(() => { aiSpeaking = false; }, 1500);
-            // Finalize any in-progress user interim
-            if (currentUserMsg) { currentUserMsg.remove(); currentUserMsg = null; }
-            if (!currentAiMsg) {
+            const now = Date.now();
+            // New bubble if >2s gap (AI paused) or first message
+            if (!currentAiMsg || (now - lastTokenTime > 2000)) {
                 currentAiMsg = document.createElement('div');
                 currentAiMsg.className = 'message ai';
                 transcript.appendChild(currentAiMsg);
             }
+            lastTokenTime = now;
             currentAiMsg.textContent += text;
             transcript.scrollTop = transcript.scrollHeight;
-        }
-
-        function startSpeechRecognition() {
-            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-            if (!SR) return;
-            speechRec = new SR();
-            speechRec.continuous = true;
-            speechRec.interimResults = true;
-            speechRec.lang = 'en-US';
-            speechRec.onresult = (e) => {
-                // Ignore results while AI is speaking (echo suppression)
-                if (aiSpeaking) return;
-                const transcript = document.getElementById('transcript');
-                for (let i = e.resultIndex; i < e.results.length; i++) {
-                    if (e.results[i].isFinal) {
-                        const txt = e.results[i][0].transcript.trim();
-                        if (!txt) continue;
-                        if (currentUserMsg) { currentUserMsg.remove(); currentUserMsg = null; }
-                        currentAiMsg = null;
-                        const div = document.createElement('div');
-                        div.className = 'message user';
-                        div.textContent = txt;
-                        transcript.appendChild(div);
-                    } else {
-                        // Update single interim bubble
-                        if (!currentUserMsg) {
-                            currentUserMsg = document.createElement('div');
-                            currentUserMsg.className = 'message user';
-                            currentUserMsg.style.opacity = '0.6';
-                            transcript.appendChild(currentUserMsg);
-                        }
-                        currentUserMsg.textContent = e.results[i][0].transcript;
-                    }
-                }
-                transcript.scrollTop = transcript.scrollHeight;
-            };
-            speechRec.onend = () => { if (isConnected && speechRec) try { speechRec.start(); } catch(e) {} };
-            try { speechRec.start(); } catch(e) {}
         }
 
         async function loadGPUStatus() {
