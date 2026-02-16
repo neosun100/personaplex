@@ -23,14 +23,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1
 
+# Upgrade pip and setuptools first (Ubuntu 22.04 ships ancient versions)
+RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
+
 WORKDIR /app
 
 # Install PyTorch first
 RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 
-# Copy moshi package and install
+# Copy moshi package and install with all dependencies
 COPY moshi/ /app/moshi/
-RUN pip3 install --no-cache-dir /app/moshi/.
+RUN pip3 install --no-cache-dir /app/moshi/ && \
+    python3 -c "import sphn, sentencepiece, aiohttp; print('moshi deps OK')"
 
 # Install additional dependencies
 RUN pip3 install --no-cache-dir \

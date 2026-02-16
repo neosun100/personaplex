@@ -356,117 +356,296 @@
         </footer>
     </div>
     
+    
+    <script src="/static/assets/recorder.min.js"></script>
     <script>
         const T = {{ t | tojson | safe }};
-        let ws = null;
-        let audioContext = null;
-        let isConnected = false;
-        
-        function changeLanguage(lang) {
-            window.location.href = '/?lang=' + lang;
-        }
-        
+        let ws = null, audioContext = null, isConnected = false;
+        let recorder = null, decoderWorker = null, workletNode = null, currentAiMsg = null;
+        let speechRec = null, currentUserMsg = null;
+
+        // --- AudioWorklet processor code (inline blob) ---
+        const WORKLET_SRC = `
+class MoshiProcessor extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.buffer = [];
+    this.readOffset = 0;
+    this.port.onmessage = (e) => {
+      if (e.data && e.data.type === 'reset') { this.buffer = []; this.readOffset = 0; return; }
+      if (e.data && e.data.frame) this.buffer.push(e.data.frame);
+    };
+  }
+  process(inputs, outputs) {
+    const out = outputs[0][0];
+    if (!out) return true;
+    let written = 0;
+    while (written < out.length && this.buffer.length > 0) {
+      const frame = this.buffer[0];
+      const available = frame.length - this.readOffset;
+      const needed = out.length - written;
+      const n = Math.min(available, needed);
+      out.set(frame.subarray(this.readOffset, this.readOffset + n), written);
+      this.readOffset += n;
+      written += n;
+      if (this.readOffset >= frame.length) { this.buffer.shift(); this.readOffset = 0; }
+    }
+    // Fill silence if underrun
+    for (let i = written; i < out.length; i++) out[i] = 0;
+    return true;
+  }
+}
+registerProcessor('moshi-processor', MoshiProcessor);`;
+
+        function changeLanguage(lang) { window.location.href = '/?lang=' + lang; }
+
         function toggleTheme() {
             const html = document.documentElement;
-            const current = html.getAttribute('data-theme');
-            html.setAttribute('data-theme', current === 'dark' ? 'light' : 'dark');
-            localStorage.setItem('theme', html.getAttribute('data-theme'));
+            const next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+            html.setAttribute('data-theme', next);
+            localStorage.setItem('theme', next);
         }
-        
-        function setPrompt(text) {
-            document.getElementById('textPrompt').value = text;
-        }
-        
+
+        function setPrompt(text) { document.getElementById('textPrompt').value = text; }
+
         async function toggleConnection() {
-            if (isConnected) {
-                disconnect();
-            } else {
-                await connect();
-            }
+            if (isConnected) disconnect(); else await connect();
         }
-        
+
         async function connect() {
             try {
                 updateStatus('connecting', T.loading);
-                
-                // Request microphone access
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                audioContext = new AudioContext();
-                
-                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-                const textPrompt = encodeURIComponent(document.getElementById('textPrompt').value);
-                const voicePrompt = document.getElementById('voicePrompt').value;
-                
-                ws = new WebSocket(`${protocol}//${window.location.host}/api/chat?text_prompt=${textPrompt}&voice_prompt=${voicePrompt}`);
-                
-                ws.onopen = () => {
-                    isConnected = true;
-                    updateStatus('connected', T.connected);
-                    document.getElementById('connectBtn').textContent = T.disconnect;
-                    document.getElementById('visualizer').classList.add('active');
-                };
-                
-                ws.onmessage = (event) => {
-                    if (event.data instanceof Blob) {
-                        // Handle audio
-                    } else {
-                        const data = event.data;
-                        if (data[0] === 2) {
-                            // Text message
-                            const text = new TextDecoder().decode(data.slice(1));
-                            appendMessage(text, 'ai');
-                        }
+
+                // 1. Create AudioContext at 24kHz for playback
+                audioContext = new AudioContext({ sampleRate: 24000 });
+
+                // 2. Register AudioWorklet for buffered playback
+                const workletBlob = new Blob([WORKLET_SRC], { type: 'application/javascript' });
+                const workletUrl = URL.createObjectURL(workletBlob);
+                await audioContext.audioWorklet.addModule(workletUrl);
+                URL.revokeObjectURL(workletUrl);
+                workletNode = new AudioWorkletNode(audioContext, 'moshi-processor');
+                workletNode.connect(audioContext.destination);
+
+                // 3. Init Ogg/Opus decoder worker
+                decoderWorker = new Worker('/static/assets/decoderWorker.min.js');
+                decoderWorker.postMessage({
+                    command: 'init',
+                    bufferLength: 960,
+                    decoderSampleRate: 24000,
+                    outputBufferSampleRate: 24000,
+                    resampleQuality: 0
+                });
+                decoderWorker.onmessage = (e) => {
+                    // decoderWorker returns [Float32Array] per channel
+                    if (e.data && e.data[0] instanceof Float32Array) {
+                        workletNode.port.postMessage({ frame: e.data[0] });
                     }
                 };
-                
+
+                // 4. Open WebSocket
+                const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const tp = encodeURIComponent(document.getElementById('textPrompt').value);
+                const vp = document.getElementById('voicePrompt').value;
+                ws = new WebSocket(`${proto}//${location.host}/api/chat?text_prompt=${tp}&voice_prompt=${vp}`);
+                ws.binaryType = 'arraybuffer';
+
+                ws.onmessage = (ev) => {
+                    const buf = new Uint8Array(ev.data);
+                    if (buf.length < 1) return;
+                    const kind = buf[0];
+                    const payload = buf.slice(1);
+
+                    if (kind === 0x00) {
+                        // Handshake received — server model is ready, start recording
+                        console.log('[PersonaPlex] Handshake received, starting mic');
+                        isConnected = true;
+                        updateStatus('connected', T.connected);
+                        document.getElementById('connectBtn').textContent = T.disconnect;
+                        document.getElementById('visualizer').classList.add('active');
+                        startRecording();
+                    } else if (kind === 0x01 && decoderWorker) {
+                        // Audio frame — send Ogg/Opus pages to decoder
+                        decoderWorker.postMessage(
+                            { command: 'decode', pages: payload },
+                            [payload.buffer]
+                        );
+                    } else if (kind === 0x02) {
+                        // Text token — streaming append
+                        appendToken(new TextDecoder().decode(payload));
+                    } else if (kind === 0x03) {
+                        // Error from server
+                        const errMsg = new TextDecoder().decode(payload);
+                        console.error('[PersonaPlex] Server error:', errMsg);
+                        updateStatus('error', errMsg);
+                        disconnect();
+                    }
+                    // 0x04 = keepalive ping, ignore
+                };
+
+                ws.onopen = () => {
+                    console.log('[PersonaPlex] WebSocket connected, waiting for handshake...');
+                    updateStatus('connecting', T.loading + ' (waiting for model)');
+                };
+
                 ws.onclose = () => {
+                    console.log('[PersonaPlex] WebSocket closed');
                     disconnect();
                 };
-                
-                ws.onerror = (error) => {
-                    console.error('WebSocket error:', error);
+
+                ws.onerror = (err) => {
+                    console.error('[PersonaPlex] WebSocket error:', err);
                     updateStatus('error', T.error);
                 };
-                
+
             } catch (error) {
-                console.error('Connection error:', error);
+                console.error('[PersonaPlex] Connection error:', error);
                 updateStatus('error', error.message);
+                disconnect();
             }
         }
-        
+
+        function startRecording() {
+            try {
+                recorder = new Recorder({
+                    encoderPath: '/static/assets/encoderWorker.min.js',
+                    encoderSampleRate: 24000,
+                    encoderFrameSize: 20,
+                    maxFramesPerPage: 2,
+                    numberOfChannels: 1,
+                    streamPages: true,
+                    encoderComplexity: 0,
+                    encoderApplication: 2049,  // OPUS_APPLICATION_AUDIO
+                    resampleQuality: 3,
+                });
+
+                recorder.ondataavailable = (oggPage) => {
+                    if (ws && ws.readyState === WebSocket.OPEN) {
+                        // Protocol: 0x01 + Ogg/Opus page bytes
+                        const frame = new Uint8Array(1 + oggPage.length);
+                        frame[0] = 0x01;
+                        frame.set(oggPage, 1);
+                        ws.send(frame);
+                    }
+                };
+
+                recorder.start().then(() => {
+                    console.log('[PersonaPlex] Recorder started');
+                    startSpeechRecognition();
+                }).catch((err) => {
+                    console.warn('[PersonaPlex] Mic unavailable:', err.message);
+                });
+            } catch (err) {
+                console.error('[PersonaPlex] Recorder init failed:', err);
+                updateStatus('error', 'Recorder: ' + err.message);
+            }
+        }
+
         function disconnect() {
+            // Stop recorder
+            if (recorder) {
+                try { recorder.stop(); } catch(e) {}
+                recorder = null;
+            }
+            // Close WebSocket
             if (ws) {
-                ws.close();
+                try { ws.close(); } catch(e) {}
                 ws = null;
             }
+            // Terminate decoder worker
+            if (decoderWorker) {
+                decoderWorker.terminate();
+                decoderWorker = null;
+            }
+            // Disconnect worklet
+            if (workletNode) {
+                try { workletNode.port.postMessage({ type: 'reset' }); } catch(e) {}
+                workletNode.disconnect();
+                workletNode = null;
+            }
+            // Close audio context
+            if (audioContext) {
+                audioContext.close().catch(() => {});
+                audioContext = null;
+            }
             isConnected = false;
+            currentAiMsg = null;
+            currentUserMsg = null;
+            aiSpeaking = false;
+            if (aiSpeakTimer) { clearTimeout(aiSpeakTimer); aiSpeakTimer = null; }
+            if (speechRec) { try { speechRec.onend = null; speechRec.abort(); } catch(e) {} speechRec = null; }
             updateStatus('disconnected', T.disconnected);
             document.getElementById('connectBtn').textContent = T.connect;
             document.getElementById('visualizer').classList.remove('active');
         }
-        
+
         function updateStatus(status, text) {
-            const dot = document.getElementById('statusDot');
-            const statusText = document.getElementById('statusText');
-            dot.className = 'status-dot ' + status;
-            statusText.textContent = text;
+            document.getElementById('statusDot').className = 'status-dot ' + status;
+            document.getElementById('statusText').textContent = text;
         }
-        
-        function appendMessage(text, type) {
+
+        let aiSpeaking = false, aiSpeakTimer = null;
+
+        function appendToken(text) {
             const transcript = document.getElementById('transcript');
-            const msg = document.createElement('div');
-            msg.className = 'message ' + type;
-            msg.textContent = text;
-            transcript.appendChild(msg);
+            // Mark AI as speaking, reset timer
+            aiSpeaking = true;
+            if (aiSpeakTimer) clearTimeout(aiSpeakTimer);
+            aiSpeakTimer = setTimeout(() => { aiSpeaking = false; }, 1500);
+            // Finalize any in-progress user interim
+            if (currentUserMsg) { currentUserMsg.remove(); currentUserMsg = null; }
+            if (!currentAiMsg) {
+                currentAiMsg = document.createElement('div');
+                currentAiMsg.className = 'message ai';
+                transcript.appendChild(currentAiMsg);
+            }
+            currentAiMsg.textContent += text;
             transcript.scrollTop = transcript.scrollHeight;
         }
-        
+
+        function startSpeechRecognition() {
+            const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (!SR) return;
+            speechRec = new SR();
+            speechRec.continuous = true;
+            speechRec.interimResults = true;
+            speechRec.lang = 'en-US';
+            speechRec.onresult = (e) => {
+                // Ignore results while AI is speaking (echo suppression)
+                if (aiSpeaking) return;
+                const transcript = document.getElementById('transcript');
+                for (let i = e.resultIndex; i < e.results.length; i++) {
+                    if (e.results[i].isFinal) {
+                        const txt = e.results[i][0].transcript.trim();
+                        if (!txt) continue;
+                        if (currentUserMsg) { currentUserMsg.remove(); currentUserMsg = null; }
+                        currentAiMsg = null;
+                        const div = document.createElement('div');
+                        div.className = 'message user';
+                        div.textContent = txt;
+                        transcript.appendChild(div);
+                    } else {
+                        // Update single interim bubble
+                        if (!currentUserMsg) {
+                            currentUserMsg = document.createElement('div');
+                            currentUserMsg.className = 'message user';
+                            currentUserMsg.style.opacity = '0.6';
+                            transcript.appendChild(currentUserMsg);
+                        }
+                        currentUserMsg.textContent = e.results[i][0].transcript;
+                    }
+                }
+                transcript.scrollTop = transcript.scrollHeight;
+            };
+            speechRec.onend = () => { if (isConnected && speechRec) try { speechRec.start(); } catch(e) {} };
+            try { speechRec.start(); } catch(e) {}
+        }
+
         async function loadGPUStatus() {
             try {
                 const res = await fetch('/api/gpu/status');
                 const data = await res.json();
                 const container = document.getElementById('gpuStatus');
-                
                 if (data.gpu) {
                     container.innerHTML = `
                         <div class="row"><span class="label">GPU</span><span class="value">${data.gpu.name}</span></div>
@@ -474,38 +653,25 @@
                         <div class="row"><span class="label">Model</span><span class="value">${data.model_loaded ? '✅ Loaded' : '❌ Not loaded'}</span></div>
                     `;
                 } else {
-                    container.innerHTML = `<div class="row"><span class="label">GPU</span><span class="value">Not available</span></div>`;
+                    container.innerHTML = '<div class="row"><span class="label">GPU</span><span class="value">N/A</span></div>';
                 }
-            } catch (e) {
-                console.error('Failed to load GPU status:', e);
-            }
+            } catch (e) { console.error('GPU status error:', e); }
         }
-        
+
         async function offloadGPU() {
-            try {
-                await fetch('/api/gpu/offload', { method: 'POST' });
-                loadGPUStatus();
-            } catch (e) {
-                console.error('Failed to offload GPU:', e);
-            }
+            try { await fetch('/api/gpu/offload', { method: 'POST' }); loadGPUStatus(); } catch(e) {}
         }
-        
+
         async function checkHealth() {
             try {
-                const res = await fetch('/health');
-                const data = await res.json();
+                const data = await (await fetch('/health')).json();
                 alert(JSON.stringify(data, null, 2));
-            } catch (e) {
-                alert('Health check failed: ' + e.message);
-            }
+            } catch (e) { alert('Health check failed: ' + e.message); }
         }
-        
-        // Initialize
+
         document.addEventListener('DOMContentLoaded', () => {
-            const savedTheme = localStorage.getItem('theme');
-            if (savedTheme) {
-                document.documentElement.setAttribute('data-theme', savedTheme);
-            }
+            const saved = localStorage.getItem('theme');
+            if (saved) document.documentElement.setAttribute('data-theme', saved);
             loadGPUStatus();
             setInterval(loadGPUStatus, 30000);
         });

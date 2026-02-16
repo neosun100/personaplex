@@ -8,28 +8,56 @@ import json
 import asyncio
 import tempfile
 import subprocess
+import random
+import time
 from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
+import numpy as np
 import torch
 import uvicorn
-from fastapi import FastAPI, WebSocket, UploadFile, File, Form, HTTPException, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 
+import sentencepiece
+import sphn
+from huggingface_hub import hf_hub_download
+
+from moshi.models import loaders, MimiModel, LMModel, LMGen
+
+
+def seed_all(seed):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = False
+
+
+def wrap_with_system_tags(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith("<system>") and cleaned.endswith("<system>"):
+        return cleaned
+    return f"<system> {cleaned} <system>"
+
+
 # GPU Manager for shared resource management
 class GPUManager:
     _instance = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._initialized = False
         return cls._instance
-    
+
     def __init__(self):
         if self._initialized:
             return
@@ -40,13 +68,14 @@ class GPUManager:
         self.text_tokenizer = None
         self.lm_gen = None
         self.device = None
+        self.voice_prompt_dir = None
         self.lock = asyncio.Lock()
         self.last_used = None
         self.idle_timeout = int(os.getenv("GPU_IDLE_TIMEOUT", "300"))
-    
+
     def get_status(self) -> dict:
         status = {
-            "model_loaded": self.model is not None,
+            "model_loaded": self.mimi is not None,
             "device": str(self.device) if self.device else None,
             "last_used": self.last_used.isoformat() if self.last_used else None,
         }
@@ -63,11 +92,8 @@ class GPUManager:
             except Exception as e:
                 status["gpu_error"] = str(e)
         return status
-    
+
     def offload(self):
-        if self.model is not None:
-            del self.model
-            self.model = None
         if self.mimi is not None:
             del self.mimi
             self.mimi = None
@@ -77,9 +103,86 @@ class GPUManager:
         if self.lm_gen is not None:
             del self.lm_gen
             self.lm_gen = None
+        if self.model is not None:
+            del self.model
+            self.model = None
+        self.text_tokenizer = None
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         return {"status": "offloaded"}
+
+    def load_model(self):
+        """Load model if not already loaded."""
+        if self.mimi is not None:
+            return
+
+        device_str = os.getenv("DEVICE", "cuda")
+        if device_str == "cuda" and torch.cuda.is_available():
+            self.device = torch.device("cuda")
+        else:
+            self.device = torch.device("cpu")
+
+        hf_repo = loaders.DEFAULT_REPO
+        cpu_offload = os.getenv("CPU_OFFLOAD", "false").lower() == "true"
+
+        print("Loading mimi...")
+        mimi_weight = hf_hub_download(hf_repo, loaders.MIMI_NAME)
+        self.mimi = loaders.get_mimi(mimi_weight, self.device)
+        self.other_mimi = loaders.get_mimi(mimi_weight, self.device)
+        print("Mimi loaded.")
+
+        tokenizer_path = hf_hub_download(hf_repo, loaders.TEXT_TOKENIZER_NAME)
+        self.text_tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
+
+        print("Loading moshi LM...")
+        moshi_weight = hf_hub_download(hf_repo, loaders.MOSHI_NAME)
+        lm = loaders.get_moshi_lm(moshi_weight, device=self.device, cpu_offload=cpu_offload)
+        lm.eval()
+        print("Moshi LM loaded.")
+
+        self.lm_gen = LMGen(
+            lm,
+            audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
+            sample_rate=self.mimi.sample_rate,
+            device=self.device,
+            frame_rate=self.mimi.frame_rate,
+            save_voice_prompt_embeddings=False,
+        )
+
+        # Get voice prompt dir
+        import tarfile
+        voices_tgz = hf_hub_download(hf_repo, "voices.tgz")
+        voices_tgz = Path(voices_tgz)
+        voices_dir = voices_tgz.parent / "voices"
+        if not voices_dir.exists():
+            print(f"Extracting {voices_tgz}...")
+            with tarfile.open(voices_tgz, "r:gz") as tar:
+                tar.extractall(path=voices_tgz.parent)
+        self.voice_prompt_dir = str(voices_dir)
+
+        # Start streaming
+        self.mimi.streaming_forever(1)
+        self.other_mimi.streaming_forever(1)
+        self.lm_gen.streaming_forever(1)
+
+        # Warmup
+        print("Warming up...")
+        frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+        for _ in range(4):
+            chunk = torch.zeros(1, 1, frame_size, dtype=torch.float32, device=self.device)
+            codes = self.mimi.encode(chunk)
+            _ = self.other_mimi.encode(chunk)
+            for c in range(codes.shape[-1]):
+                tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                if tokens is None:
+                    continue
+                _ = self.mimi.decode(tokens[:, 1:9])
+                _ = self.other_mimi.decode(tokens[:, 1:9])
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        print("Model ready.")
+        self.last_used = datetime.utcnow()
+
 
 gpu_manager = GPUManager()
 
@@ -275,7 +378,7 @@ async def health():
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
         "gpu_available": torch.cuda.is_available(),
-        "model_loaded": gpu_manager.model is not None
+        "model_loaded": gpu_manager.mimi is not None
     }
 
 @app.get("/api/gpu/status")
@@ -307,16 +410,14 @@ async def offline_inference(
 ):
     """Offline inference endpoint - process audio file and return response"""
     try:
-        # Save uploaded file
         input_path = Path(tempfile.mktemp(suffix=".wav"))
         output_path = Path(tempfile.mktemp(suffix=".wav"))
         output_text = Path(tempfile.mktemp(suffix=".json"))
-        
+
         with open(input_path, "wb") as f:
             content = await file.read()
             f.write(content)
-        
-        # Run offline inference
+
         cmd = [
             sys.executable, "-m", "moshi.offline",
             "--voice-prompt", voice_prompt,
@@ -326,20 +427,19 @@ async def offline_inference(
             "--output-text", str(output_text),
             "--seed", str(seed),
         ]
-        
+
         if os.getenv("CPU_OFFLOAD", "false").lower() == "true":
             cmd.append("--cpu-offload")
-        
+
         env = os.environ.copy()
         result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-        
+
         if result.returncode != 0:
             raise HTTPException(status_code=500, detail=result.stderr)
-        
-        # Read results
+
         with open(output_text) as f:
             text_output = json.load(f)
-        
+
         return FileResponse(
             output_path,
             media_type="audio/wav",
@@ -349,33 +449,212 @@ async def offline_inference(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        # Cleanup
         for p in [input_path, output_text]:
             if p.exists():
                 p.unlink()
+
+
+@app.websocket("/api/chat")
+async def websocket_chat(ws: WebSocket):
+    """Real-time full-duplex conversation via WebSocket.
+
+    Protocol (binary frames):
+      Client -> Server: 0x01 + opus audio bytes
+      Server -> Client: 0x00 (handshake)
+      Server -> Client: 0x01 + opus audio bytes
+      Server -> Client: 0x02 + utf-8 text token
+    """
+    await ws.accept()
+
+    # Parse query params
+    text_prompt = ws.query_params.get("text_prompt", "")
+    voice_prompt_name = ws.query_params.get("voice_prompt", "NATF2.pt")
+    seed = ws.query_params.get("seed", None)
+
+    try:
+        # Ensure model is loaded
+        gpu_manager.load_model()
+    except Exception as e:
+        await ws.send_bytes(b"\x03" + str(e).encode("utf-8"))
+        await ws.close(code=1011, reason="Model load failed")
+        return
+
+    gm = gpu_manager
+    frame_size = int(gm.mimi.sample_rate / gm.mimi.frame_rate)
+
+    # Resolve voice prompt path
+    voice_prompt_path = os.path.join(gm.voice_prompt_dir, voice_prompt_name)
+    if not os.path.exists(voice_prompt_path):
+        await ws.close(code=1008, reason=f"Voice prompt not found: {voice_prompt_name}")
+        return
+
+    close = False
+
+    try:
+        await asyncio.wait_for(gm.lock.acquire(), timeout=1.0)
+    except asyncio.TimeoutError:
+        await ws.send_bytes(b"\x03" + "Server busy, another session is active".encode("utf-8"))
+        await ws.close(code=1013, reason="Server busy")
+        return
+
+    try:
+        gm.last_used = datetime.utcnow()
+
+        if seed is not None and seed != "-1":
+            seed_all(int(seed))
+        else:
+            seed_all(42424242)
+
+        # Load voice prompt
+        if gm.lm_gen.voice_prompt != voice_prompt_path:
+            if voice_prompt_path.endswith('.pt'):
+                gm.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
+            else:
+                gm.lm_gen.load_voice_prompt(voice_prompt_path)
+
+        # Set text prompt
+        if text_prompt:
+            gm.lm_gen.text_prompt_tokens = gm.text_tokenizer.encode(wrap_with_system_tags(text_prompt))
+        else:
+            gm.lm_gen.text_prompt_tokens = None
+
+        opus_writer = sphn.OpusStreamWriter(gm.mimi.sample_rate)
+        opus_reader = sphn.OpusStreamReader(gm.mimi.sample_rate)
+
+        gm.mimi.reset_streaming()
+        gm.other_mimi.reset_streaming()
+        gm.lm_gen.reset_streaming()
+
+        # Process system prompts — send keepalive pings to prevent Cloudflare timeout
+        async def is_alive():
+            if close:
+                return False
+            try:
+                await ws.send_bytes(b"\x04")  # keepalive ping
+            except Exception:
+                return False
+            return True
+
+        try:
+            await gm.lm_gen.step_system_prompts_async(gm.mimi, is_alive=is_alive)
+        except Exception as e:
+            await ws.close(code=1011, reason=f"System prompt error: {e}")
+            return
+
+        gm.mimi.reset_streaming()
+
+        # Send handshake
+        await ws.send_bytes(b"\x00")
+
+        async def recv_loop():
+            nonlocal close
+            try:
+                while not close:
+                    data = await ws.receive_bytes()
+                    if len(data) == 0:
+                        continue
+                    kind = data[0]
+                    if kind == 1:  # audio
+                        opus_reader.append_bytes(data[1:])
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                pass
+            finally:
+                close = True
+
+        async def opus_loop():
+            all_pcm_data = None
+            while not close:
+                await asyncio.sleep(0.001)
+                pcm = opus_reader.read_pcm()
+                if pcm.shape[-1] == 0:
+                    continue
+                if all_pcm_data is None:
+                    all_pcm_data = pcm
+                else:
+                    all_pcm_data = np.concatenate((all_pcm_data, pcm))
+                while all_pcm_data is not None and all_pcm_data.shape[-1] >= frame_size:
+                    chunk = all_pcm_data[:frame_size]
+                    all_pcm_data = all_pcm_data[frame_size:]
+                    if all_pcm_data.shape[-1] == 0:
+                        all_pcm_data = None
+                    chunk = torch.from_numpy(chunk).to(device=gm.device)[None, None]
+                    codes = gm.mimi.encode(chunk)
+                    _ = gm.other_mimi.encode(chunk)
+                    for c in range(codes.shape[-1]):
+                        tokens = gm.lm_gen.step(codes[:, :, c: c + 1])
+                        if tokens is None:
+                            continue
+                        main_pcm = gm.mimi.decode(tokens[:, 1:9])
+                        _ = gm.other_mimi.decode(tokens[:, 1:9])
+                        main_pcm = main_pcm.cpu()
+                        opus_writer.append_pcm(main_pcm[0, 0].detach().numpy())
+                        text_token = tokens[0, 0, 0].item()
+                        if text_token not in (0, 3):
+                            _text = gm.text_tokenizer.id_to_piece(text_token)
+                            _text = _text.replace("▁", " ")
+                            try:
+                                await ws.send_bytes(b"\x02" + _text.encode("utf-8"))
+                            except Exception:
+                                return
+
+        async def send_loop():
+            while not close:
+                await asyncio.sleep(0.001)
+                msg = opus_writer.read_bytes()
+                if len(msg) > 0:
+                    try:
+                        await ws.send_bytes(b"\x01" + msg)
+                    except Exception:
+                        return
+
+        tasks = [
+            asyncio.create_task(recv_loop()),
+            asyncio.create_task(opus_loop()),
+            asyncio.create_task(send_loop()),
+        ]
+
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        close = True
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        try:
+            await ws.close()
+        except Exception:
+            pass
+
+        gm.last_used = datetime.utcnow()
+    finally:
+        gm.lock.release()
+
 
 # Main entry point
 def main():
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8998"))
-    
-    # Check for SSL
+
     ssl_dir = os.getenv("SSL_DIR")
     ssl_keyfile = None
     ssl_certfile = None
-    
+
     if ssl_dir and Path(ssl_dir).exists():
         key_path = Path(ssl_dir) / "key.pem"
         cert_path = Path(ssl_dir) / "cert.pem"
         if key_path.exists() and cert_path.exists():
             ssl_keyfile = str(key_path)
             ssl_certfile = str(cert_path)
-    
+
     print(f"Starting PersonaPlex server on {host}:{port}")
     print(f"GPU Available: {torch.cuda.is_available()}")
     if torch.cuda.is_available():
         print(f"GPU: {torch.cuda.get_device_name(0)}")
-    
+
     uvicorn.run(
         "app.server:app",
         host=host,

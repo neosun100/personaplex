@@ -15,6 +15,7 @@ services:
       - CPU_OFFLOAD=${CPU_OFFLOAD:-false}
       - GPU_IDLE_TIMEOUT=${GPU_IDLE_TIMEOUT:-300}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NO_TORCH_COMPILE=1
     volumes:
       - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
       - /tmp/personaplex:/tmp/personaplex
@@ -23,7 +24,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['${NVIDIA_VISIBLE_DEVICES:-0}']
+              device_ids: ['${NVIDIA_VISIBLE_DEVICES:-2}']
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
@@ -32,6 +33,3 @@ services:
       timeout: 10s
       retries: 3
       start_period: 120s
-
-volumes:
-  hf-cache:
