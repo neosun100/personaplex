@@ -600,10 +600,13 @@ registerProcessor('moshi-processor', MoshiProcessor);`;
                 const data = await res.json();
                 const container = document.getElementById('gpuStatus');
                 if (data.gpu) {
+                    const idleSec = data.last_used ? Math.floor((Date.now() - new Date(data.last_used + 'Z').getTime()) / 1000) : '-';
                     container.innerHTML = `
                         <div class="row"><span class="label">GPU</span><span class="value">${data.gpu.name}</span></div>
-                        <div class="row"><span class="label">Memory</span><span class="value">${data.gpu.memory_allocated}/${data.gpu.memory_total} MB</span></div>
+                        <div class="row"><span class="label">VRAM</span><span class="value">${data.gpu.memory_allocated}/${data.gpu.memory_total} MB</span></div>
                         <div class="row"><span class="label">Model</span><span class="value">${data.model_loaded ? '✅ Loaded' : '❌ Not loaded'}</span></div>
+                        <div class="row"><span class="label">Connections</span><span class="value">${data.active_connections || 0}</span></div>
+                        <div class="row"><span class="label">Idle</span><span class="value">${idleSec}s / ${data.idle_timeout}s</span></div>
                     `;
                 } else {
                     container.innerHTML = '<div class="row"><span class="label">GPU</span><span class="value">N/A</span></div>';
@@ -612,7 +615,19 @@ registerProcessor('moshi-processor', MoshiProcessor);`;
         }
 
         async function offloadGPU() {
-            try { await fetch('/api/gpu/offload', { method: 'POST' }); loadGPUStatus(); } catch(e) {}
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '⏳ Releasing...';
+            try {
+                const res = await fetch('/api/gpu/offload', { method: 'POST' });
+                const data = await res.json();
+                btn.textContent = `✅ Released (${data.memory_allocated || 0}MB)`;
+                setTimeout(() => { btn.textContent = '🗑️ ' + T.offload_gpu; btn.disabled = false; }, 3000);
+                loadGPUStatus();
+            } catch(e) {
+                btn.textContent = '❌ Failed';
+                setTimeout(() => { btn.textContent = '🗑️ ' + T.offload_gpu; btn.disabled = false; }, 3000);
+            }
         }
 
         async function checkHealth() {

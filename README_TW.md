@@ -139,6 +139,12 @@ export HF_TOKEN=your_huggingface_token
 
 ## 📋 更新日誌
 
+### v1.3.0 (2026-02-17)
+- 🗑️ 修復GPU卸載：透過 `gc.collect()` + `torch.cuda.ipc_collect()` 真正釋放顯存（18GB → 0.6GB）
+- ⏱️ 閒置自動卸載GPU（`GPU_IDLE_TIMEOUT`，預設300秒）
+- 📊 GPU狀態新增活躍連線數和閒置計時器
+- 🔄 卸載後下次連線自動重新載入模型
+
 ### v1.2.0 (2026-02-16)
 - 🔧 修復CUDA OOM：推理迴圈添加 `torch.no_grad()`（支援無限時長對話）
 - 🔒 修復GPU鎖：逾時返回「伺服器忙碌」而非無限等待

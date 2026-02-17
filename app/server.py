@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
+import gc
+
 import numpy as np
 import torch
 import uvicorn
@@ -72,12 +74,15 @@ class GPUManager:
         self.lock = asyncio.Lock()
         self.last_used = None
         self.idle_timeout = int(os.getenv("GPU_IDLE_TIMEOUT", "300"))
+        self.active_connections = 0
 
     def get_status(self) -> dict:
         status = {
             "model_loaded": self.mimi is not None,
             "device": str(self.device) if self.device else None,
             "last_used": self.last_used.isoformat() if self.last_used else None,
+            "active_connections": self.active_connections,
+            "idle_timeout": self.idle_timeout,
         }
         if torch.cuda.is_available():
             try:
@@ -94,22 +99,31 @@ class GPUManager:
         return status
 
     def offload(self):
+        """Thoroughly release all GPU memory."""
+        # Clear model references
+        if self.lm_gen is not None:
+            # Clear internal model reference first
+            if hasattr(self.lm_gen, 'lm_model'):
+                del self.lm_gen.lm_model
+            del self.lm_gen
+            self.lm_gen = None
         if self.mimi is not None:
             del self.mimi
             self.mimi = None
         if self.other_mimi is not None:
             del self.other_mimi
             self.other_mimi = None
-        if self.lm_gen is not None:
-            del self.lm_gen
-            self.lm_gen = None
         if self.model is not None:
             del self.model
             self.model = None
         self.text_tokenizer = None
+        # Force garbage collection to break circular refs
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        return {"status": "offloaded"}
+            torch.cuda.ipc_collect()
+        gc.collect()
+        return {"status": "offloaded", "memory_allocated": torch.cuda.memory_allocated(0) // (1024**2) if torch.cuda.is_available() else 0}
 
     def load_model(self):
         """Load model if not already loaded."""
@@ -185,6 +199,24 @@ class GPUManager:
 
 
 gpu_manager = GPUManager()
+
+# Background idle check task
+async def idle_check_loop():
+    """Periodically check if GPU should be offloaded due to inactivity."""
+    while True:
+        await asyncio.sleep(60)  # check every minute
+        gm = gpu_manager
+        if gm.mimi is None:
+            continue
+        if gm.active_connections > 0:
+            continue
+        if gm.last_used is None:
+            continue
+        elapsed = (datetime.utcnow() - gm.last_used).total_seconds()
+        if elapsed >= gm.idle_timeout:
+            print(f"[GPU] Idle for {elapsed:.0f}s (timeout={gm.idle_timeout}s), offloading...")
+            gm.offload()
+            print(f"[GPU] Offloaded. Memory allocated: {torch.cuda.memory_allocated(0)//(1024**2)}MB")
 
 # FastAPI App
 app = FastAPI(
@@ -360,6 +392,10 @@ PROMPT_EXAMPLES = [
 ]
 
 # Routes
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(idle_check_loop())
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request, lang: str = "en"):
     t = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
@@ -499,6 +535,7 @@ async def websocket_chat(ws: WebSocket):
 
     try:
         gm.last_used = datetime.utcnow()
+        gm.active_connections += 1
 
         if seed is not None and seed != "-1":
             seed_all(int(seed))
@@ -632,6 +669,7 @@ async def websocket_chat(ws: WebSocket):
 
         gm.last_used = datetime.utcnow()
     finally:
+        gm.active_connections = max(0, gm.active_connections - 1)
         gm.lock.release()
 
 

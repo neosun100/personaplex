@@ -139,6 +139,12 @@ export HF_TOKEN=your_huggingface_token
 
 ## 📋 変更履歴
 
+### v1.3.0 (2026-02-17)
+- 🗑️ GPUオフロード修正：`gc.collect()` + `torch.cuda.ipc_collect()` でVRAMを完全解放（18GB → 0.6GB）
+- ⏱️ アイドル時の自動GPUオフロード（`GPU_IDLE_TIMEOUT`、デフォルト300秒）
+- 📊 GPU状態にアクティブ接続数とアイドルタイマーを追加
+- 🔄 オフロード後、次の接続時にモデルを自動再ロード
+
 ### v1.2.0 (2026-02-16)
 - 🔧 CUDA OOM修正：推論ループに `torch.no_grad()` 追加（無制限の会話が可能に）
 - 🔒 GPUロック修正：無限待機の代わりに「サーバービジー」タイムアウト

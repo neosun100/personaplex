@@ -213,6 +213,12 @@ personaplex/
 
 ## 📋 Changelog
 
+### v1.3.0 (2026-02-17)
+- 🗑️ Fix GPU offload: truly release VRAM via `gc.collect()` + `torch.cuda.ipc_collect()` (18GB → 0.6GB)
+- ⏱️ Auto-offload GPU after idle timeout (`GPU_IDLE_TIMEOUT`, default 300s)
+- 📊 GPU status now shows active connections and idle timer
+- 🔄 Model auto-reloads on next connection after offload
+
 ### v1.2.0 (2026-02-16)
 - 🔧 Fix CUDA OOM: add `torch.no_grad()` to inference loop (enables unlimited conversation)
 - 🔒 Fix GPU lock: timeout with "Server busy" instead of infinite hang
