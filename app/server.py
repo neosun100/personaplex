@@ -100,17 +100,28 @@ class GPUManager:
 
     def offload(self):
         """Thoroughly release all GPU memory."""
-        # Clear model references
+        # Reset streaming states first (clears CUDAGraph caches)
         if self.lm_gen is not None:
-            # Clear internal model reference first
+            try:
+                self.lm_gen.reset_streaming()
+            except Exception:
+                pass
             if hasattr(self.lm_gen, 'lm_model'):
                 del self.lm_gen.lm_model
             del self.lm_gen
             self.lm_gen = None
         if self.mimi is not None:
+            try:
+                self.mimi.reset_streaming()
+            except Exception:
+                pass
             del self.mimi
             self.mimi = None
         if self.other_mimi is not None:
+            try:
+                self.other_mimi.reset_streaming()
+            except Exception:
+                pass
             del self.other_mimi
             self.other_mimi = None
         if self.model is not None:

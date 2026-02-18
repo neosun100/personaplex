@@ -4,31 +4,11 @@
 
 ## Overview
 
-PersonaPlex provides a Model Context Protocol (MCP) server for programmatic access to its full-duplex conversational AI capabilities. This allows integration with AI assistants, automation tools, and custom applications.
+PersonaPlex provides a Model Context Protocol (MCP) server for programmatic access to its full-duplex conversational AI capabilities. The MCP server delegates to the REST API, ensuring consistent behavior and proper GPU management (including v1.3.0 thorough VRAM release).
 
 ## Quick Start
 
-### 1. Configure MCP Client
-
-Add to your MCP configuration (e.g., `~/.config/claude/mcp.json`):
-
-```json
-{
-  "mcpServers": {
-    "personaplex": {
-      "command": "python",
-      "args": ["-m", "app.mcp_server"],
-      "cwd": "/path/to/personaplex",
-      "env": {
-        "HF_TOKEN": "your_huggingface_token",
-        "GPU_IDLE_TIMEOUT": "300"
-      }
-    }
-  }
-}
-```
-
-### 2. Docker-based MCP
+### 1. Docker-based MCP (Recommended)
 
 ```json
 {
@@ -44,6 +24,23 @@ Add to your MCP configuration (e.g., `~/.config/claude/mcp.json`):
 }
 ```
 
+### 2. Local MCP
+
+```json
+{
+  "mcpServers": {
+    "personaplex": {
+      "command": "python",
+      "args": ["-m", "app.mcp_server"],
+      "cwd": "/path/to/personaplex",
+      "env": {
+        "PERSONAPLEX_API_URL": "http://localhost:8998"
+      }
+    }
+  }
+}
+```
+
 ## Available Tools
 
 ### `health_check`
@@ -51,27 +48,32 @@ Check service health and GPU availability.
 
 ```python
 result = await mcp.call_tool("health_check", {})
-# Returns: {"status": "healthy", "gpu_available": true, ...}
+# Returns: {"status": "healthy", "gpu_available": true, "model_loaded": false, ...}
 ```
 
 ### `get_gpu_status`
-Get detailed GPU memory and status information.
+Get detailed GPU memory, active connections, and idle timeout info.
 
 ```python
 result = await mcp.call_tool("get_gpu_status", {})
-# Returns: {"gpu": {"name": "NVIDIA L40S", "memory_total_mb": 46068, ...}}
+# Returns: {
+#   "model_loaded": true,
+#   "active_connections": 0,
+#   "idle_timeout": 300,
+#   "gpu": {"name": "NVIDIA L40S", "memory_allocated": 18334, ...}
+# }
 ```
 
 ### `offload_gpu`
-Release GPU memory by unloading the model.
+Thoroughly release GPU memory (gc.collect + torch.cuda.ipc_collect).
 
 ```python
 result = await mcp.call_tool("offload_gpu", {})
-# Returns: {"status": "offloaded"}
+# Returns: {"status": "offloaded", "memory_allocated": 16}
 ```
 
 ### `list_voices`
-Get all available voice options.
+Get all 18 available voice options.
 
 ```python
 result = await mcp.call_tool("list_voices", {})
@@ -83,7 +85,7 @@ Get example text prompts for different scenarios.
 
 ```python
 result = await mcp.call_tool("get_prompt_examples", {})
-# Returns: {"examples": [{"name": "Assistant", "prompt": "...", ...}, ...]}
+# Returns: {"prompts": [{"id": "assistant", "name": "Assistant", "text": "...", ...}, ...]}
 ```
 
 ### `process_audio`
@@ -124,41 +126,32 @@ result = await mcp.call_tool("process_audio", {
 | Variety Female | VARF0-4.pt | Diverse female voice styles |
 | Variety Male | VARM0-4.pt | Diverse male voice styles |
 
-## Prompt Examples
-
-### Assistant (Default)
-```
-You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.
-```
-
-### Customer Service
-```
-You work for First Neuron Bank which is a bank and your name is Alexis Kim. Information: The customer's transaction for $1,200 at Home Depot was declined. Verify customer identity.
-```
-
-### Casual Conversation
-```
-You enjoy having a good conversation.
-```
-
 ## Error Handling
 
-All tools return a `status` field:
-- `"success"` - Operation completed successfully
-- `"error"` - Operation failed, check `error` field for details
+All tools return a `status` field on error:
 
 ```python
 result = await mcp.call_tool("process_audio", {...})
-if result["status"] == "error":
+if "error" in result:
     print(f"Error: {result['error']}")
 ```
 
-## Best Practices
+## Architecture
 
-1. **GPU Management**: Call `offload_gpu` after processing to free memory
-2. **File Paths**: Use `/tmp/personaplex/` for temporary files
-3. **Voice Selection**: Use NAT voices for natural conversations
-4. **Seed Control**: Use fixed seed for reproducible results
+```
+MCP Client (Claude, etc.)
+    ↓ stdio/JSON-RPC
+MCP Server (app/mcp_server.py)
+    ↓ HTTP requests
+REST API Server (app/server.py)
+    ↓ GPU inference
+PersonaPlex Model
+```
+
+The MCP server is a thin client that delegates all operations to the REST API. This ensures:
+- Consistent GPU management (offload truly releases VRAM)
+- Accurate status reporting (active connections, idle timer)
+- No duplicate model loading
 
 ## Comparison: MCP vs REST API
 
@@ -166,11 +159,20 @@ if result["status"] == "error":
 |---------|-----|----------|
 | Use Case | Programmatic/AI integration | Web/HTTP clients |
 | Protocol | stdio/JSON-RPC | HTTP/REST |
-| Real-time | ❌ | ✅ (WebSocket) |
-| Batch Processing | ✅ | ✅ |
+| Real-time Chat | ❌ | ✅ (WebSocket) |
+| Offline Inference | ✅ | ✅ |
 | GPU Management | ✅ | ✅ |
 
 ## Troubleshooting
+
+### MCP can't connect to API
+```bash
+# Ensure container is running
+docker ps | grep personaplex
+
+# Check API is accessible
+docker exec personaplex curl -s http://localhost:8998/health
+```
 
 ### Model not loading
 ```bash
@@ -183,17 +185,9 @@ echo $HF_TOKEN
 
 ### Out of GPU memory
 ```bash
-# Enable CPU offload
+# Call offload first
+docker exec personaplex curl -X POST http://localhost:8998/api/gpu/offload
+
+# Or enable CPU offload
 export CPU_OFFLOAD=true
-
-# Or call offload_gpu before processing
-```
-
-### Connection issues
-```bash
-# Check if container is running
-docker ps | grep personaplex
-
-# Check logs
-docker logs personaplex
 ```
